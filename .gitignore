@@ -1,0 +1,13 @@
+# Compiled binary
+bin/
+
+# Symlink to lib384/dist — created by setup step, not committed
+dist
+
+# Local environment
+env.js
+
+# OS / editor
+.DS_Store
+.vscode/
+*~

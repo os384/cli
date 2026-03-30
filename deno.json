@@ -1,0 +1,16 @@
+{
+  "name": "@384/cli",
+  "version": "1.0.0-rc2.48",
+  "license": "AGPL-3.0-or-later",
+  "exports": {},
+
+  "tasks": {
+    "run": "deno run --allow-read --allow-write --allow-net --allow-env src/384.ts",
+    "dev": "deno run --allow-read --allow-write --allow-net --allow-env --watch src/384.ts"
+  },
+
+  "imports": {
+    "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.7",
+    "@std/cli":        "jsr:@std/cli@^1.0.0"
+  }
+}

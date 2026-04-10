@@ -111,11 +111,49 @@ the import reverts to the versioned JSR URL and the lockfile handles integrity.
 
 ---
 
+## Current status (March 2026)
+
+JSR publishing for lib384 is wired up and working (`@384/lib` on jsr.io, auto-published
+from GitHub via OIDC). The CLI is a different story — see below.
+
+**The CLI is not on JSR.** It imports lib384 from a c3.384.dev channel page, which
+JSR rejects as an `invalid-external-import` (only `jsr:`, `npm:`, `data:`, `bun:`, and
+`node:` specifiers are allowed in published packages). Until that import constraint is
+resolved the CLI stays on the channel-page distribution model.
+
+**TypeScript version lock.** os384 requires TypeScript 5.4.2 exactly. TS 5.5 introduced
+a breaking change in how `Uint8Array<ArrayBufferLike>` is typed — code that was clean
+under 5.4.x began requiring casts under 5.5+. We treat casting as a bug, not a fix.
+Deno bundles its own TypeScript and offers no way to pin the version, so the path
+forward is to wait for the type system to stabilise.
+
+**TypeScript 6.0** shipped on March 23, 2026 — the last JavaScript-based TypeScript
+release. It's a milestone, but does not by itself resolve the `Uint8Array` compatibility
+question for os384.
+
+**TypeScript 7.0** is the Go-native rewrite ("tsgo"), expected in the next few months.
+Deno 2.6 already ships tsgo as an experimental opt-in. The Deno team has been fast about
+tracking TypeScript milestones, and we expect them to be nimble adopting 7.0 once it
+stabilises.
+
+**Roadmap:** once Deno ships a stable tsgo-backed TypeScript (6.0 or 7.0 — whichever
+proves the cleaner cut), os384 will modernise its types and revisit JSR for the CLI.
+At that point both lib384 and the CLI could be published as `@384/lib` and `@384/cli`
+with all imports resolved through jsr: specifiers, with no channel-page workaround needed.
+
+Until then: os384 is distributed exclusively through os384 channel pages. The `@384/lib`
+package on jsr.io is a preview; do not treat it as the canonical distribution point yet.
+
+---
+
 ## Open questions
 
 - Does Deno support `DENO_REGISTRY_URL` (or equivalent) to redirect `jsr:` specifiers
   to a custom host? Needs verification against Deno 2.x docs.
-- Scope name: `@os384` on jsr.io — is that claimed? Worth reserving early.
-- Should lib384 and the CLI be separate JSR packages, or a monorepo with
-  `@os384/lib384` and `@os384/cli` as workspace members published together?
-- License: JSR packages are public. Confirm GPL-3.0 is compatible with jsr.io ToS.
+- Scope `@384` is registered on jsr.io. `@384/lib` is live. `@384/cli` is reserved for
+  when the TypeScript situation is resolved.
+- Should lib384 and the CLI be published as a monorepo with workspace members, or as
+  independently versioned packages? Currently leaning toward independent — their release
+  cadences are different.
+- License: JSR packages are public. AGPL-3.0-or-later is confirmed compatible with
+  jsr.io ToS.

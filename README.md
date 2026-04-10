@@ -15,7 +15,7 @@ brew install deno
 
 # Install 384 globally. It's always safe to toggle the date version to any value.
 deno install -f --global -n 384 --allow-read --allow-write --allow-net --allow-env \
-  https://c3.384.dev/api/v2/page/8yp0Lyfr/384.20260330.2.ts
+  https://c3.384.dev/api/v2/page/8yp0Lyfr/384.20260409.0.ts
 ```
 
 Make sure `~/.deno/bin` is on your PATH:
@@ -61,4 +61,4 @@ manage — no npm, no package registry, no binary releases needed.
 
 ## License
 
-GPL-3.0-only — see [LICENSE](LICENSE)
+AGPL-3.0

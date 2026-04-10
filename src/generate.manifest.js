@@ -7,7 +7,7 @@
 
 // under development as tool to support os384 app development
 
-import '../env.js'
+import '../keys.js'
 import '../config.js'
 
 // @deno-types="../dist/384.esm.d.ts"

@@ -18,7 +18,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import '../env.js'
+import '../keys.js'
 import '../config.js'
 
 import { Command } from "https://deno.land/x/cliffy/command/mod.ts";

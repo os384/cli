@@ -21,7 +21,7 @@
 // scratch, for various more advanced capabilities of reading/streaming a channel
 
 // @deno-types="../dist/384.esm.d.ts"
-import '../env.js'
+import '../keys.js'
 import '../config.js'
 
 import { ChannelApi, ChannelStream, ChannelStreamOptions, Channel, extractPayload } from "../dist/384.esm.js"

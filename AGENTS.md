@@ -10,7 +10,7 @@ bootstraps wallets.
 
 ## Key facts
 
-- Entry point: `src/384.ts` (version `20250316.1`)
+- Entry point: `src/384.ts`
 - Installed globally as `384` via:
   ```sh
   deno install --global -n 384 --allow-read --allow-write --allow-net --allow-env \

@@ -1,8 +1,8 @@
 {
   "name": "@384/cli",
-  "version": "1.0.0-rc2.48",
+  "version": "0.20260409.0",
   "license": "AGPL-3.0-or-later",
-  "exports": {},
+  "exports": "./src/384.ts",
 
   "tasks": {
     "run": "deno run --allow-read --allow-write --allow-net --allow-env src/384.ts",

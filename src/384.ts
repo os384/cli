@@ -19,7 +19,9 @@
  */
 
 // const VERSION = "20250316.1" ... wow it's been a year
-const VERSION = "20260330.2 (1.0.0.rc2.48)" // toggle import below for lib384 as well if needed
+
+// toggle import below for lib384 as well if needed
+const VERSION = "0.20260406.4"  // also keep 'deno.json' in sync
 
 const DBG0 = false
 
@@ -36,7 +38,7 @@ import {
     SB384, ChannelApi, Channel, ChannelStream, SBServerInfo, SBUserPrivateKey, SBStorageToken,
     browser, utils, isTextLikeMimeType, serverApiCosts, getMimeType, ObjectHandle, stringify_ObjectHandle,
     sbCrypto, base62ToArrayBuffer, arrayBufferToBase62, generatePassPhrase, SBFileSystem, FileSetMeta,
-    ChannelHandle, SBFile, extractPayload,
+    ChannelHandle, SBFile, extractPayload, Protocol_AES_GCM_256,
 } from "https://c3.384.dev/api/v2/page/H93wQduy/384.esm.20260330.2.js";
 
 // lib384 via JSR (future — pending Deno/TypeScript version compatibility)
@@ -44,7 +46,7 @@ import {
 //     SB384, ChannelApi, Channel, ChannelStream, SBServerInfo, SBUserPrivateKey, SBStorageToken,
 //     browser, utils, isTextLikeMimeType, serverApiCosts, getMimeType, ObjectHandle, stringify_ObjectHandle,
 //     sbCrypto, base62ToArrayBuffer, arrayBufferToBase62, generatePassPhrase, SBFileSystem, FileSetMeta,
-//     ChannelHandle, SBFile, extractPayload,
+//     ChannelHandle, SBFile, extractPayload, Protocol_AES_GCM_256,
 // } from "@384/lib";
 
 // LocalStorage is inlined here (from cli/src/LocalStorage.ts) so that 384.ts
@@ -200,13 +202,72 @@ const SEP_ = _SEP_ + '\n'
 const SEP = _SEP + '\n'
 
 const HOME_DIR_PATH = Deno.build.os === 'windows' ? Deno.env.get('USERPROFILE') : Deno.env.get('HOME');
-const OS384_PATH = Deno.env.get('OS384_HOME') || HOME_DIR_PATH + '/.os384';
 
-const BUDGET_KEY = Deno.env.get('OS384_BUDGET_KEY') || Deno.env.get('SB384_BUDGET_CHANNEL_KEY') || null;
-const LEDGER_KEY = Deno.env.get('OS384_LEDGER_KEY') || null;
+// Config (small state) goes to ~/.os384; bulk data (wrangler state, mirror cache) to /Volumes/os384
+const OS384_CONFIG_PATH = Deno.env.get('OS384_CONFIG_HOME') || HOME_DIR_PATH + '/.os384';
+const OS384_DATA_PATH = Deno.env.get('OS384_DATA_HOME') || '/Volumes/os384';
+// Legacy alias — existing code that just needs "a path" gets config path
+const OS384_PATH = OS384_CONFIG_PATH;
 
-const DEFAULT_CHANNEL_SERVER = Deno.env.get('OS384_CHANNEL_SERVER') || "https://c3.384.dev"
-const DEFAULT_STORAGE_SERVER = Deno.env.get('OS384_STORAGE_SERVER') || "https://s3.384.dev"
+// ── Config.json schema and helpers ──────────────────────────────────────────
+
+interface Os384Profile {
+    channelServer: string;
+    storageServer: string;
+    budgetKey?: string;
+    ledgerKey?: string;
+}
+
+interface Os384Config {
+    version: 1;
+    profiles: Record<string, Os384Profile>;
+    defaultProfile?: string;
+}
+
+const CONFIG_FILE = `${OS384_CONFIG_PATH}/config.json`;
+
+function ensureConfigDir(): void {
+    try {
+        Deno.mkdirSync(OS384_CONFIG_PATH, { recursive: true });
+    } catch { /* already exists */ }
+}
+
+function readConfig(): Os384Config | null {
+    try {
+        return JSON.parse(Deno.readTextFileSync(CONFIG_FILE)) as Os384Config;
+    } catch {
+        return null;
+    }
+}
+
+function writeConfig(config: Os384Config): void {
+    ensureConfigDir();
+    Deno.writeTextFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n');
+}
+
+/** Returns the active profile, resolved from --local / env / config default */
+function resolveProfile(config: Os384Config | null, local?: boolean): Os384Profile | null {
+    if (!config) return null;
+    const profileName = local ? 'local'
+        : Deno.env.get('OS384_PROFILE') || config.defaultProfile || 'dev';
+    return config.profiles[profileName] || null;
+}
+
+// ── Bootstrap: read config.json, then let env vars override ─────────────────
+
+const _config = readConfig();
+const _profile = resolveProfile(_config);
+
+const BUDGET_KEY = Deno.env.get('OS384_BUDGET_KEY')
+    || Deno.env.get('SB384_BUDGET_CHANNEL_KEY')
+    || _profile?.budgetKey
+    || null;
+const LEDGER_KEY = Deno.env.get('OS384_LEDGER_KEY')
+    || _profile?.ledgerKey
+    || null;
+
+const DEFAULT_CHANNEL_SERVER = Deno.env.get('OS384_CHANNEL_SERVER') || "https://c3.384.dev";
+const DEFAULT_STORAGE_SERVER = Deno.env.get('OS384_STORAGE_SERVER') || "https://s3.384.dev";
 
 const MiB = 1024 * 1024;
 const TOP_UP_INCREMENT = 16 * MiB;
@@ -354,8 +415,12 @@ function getOperationCase(params: Options): ChannelOpCase {
 }
 
 function preProcessOptions(options: Options): Options {
-    // console.log("preProcessOptions", options)
-    if (options.local === true) { options.server = "http://localhost:3845" }
+    // Server precedence: --server (explicit) > --local > env var > hardcoded default
+    // Cliffy sets options.server to DEFAULT_CHANNEL_SERVER when not explicitly given,
+    // so --local only overrides if server is still at that default.
+    if (options.local === true && options.server === DEFAULT_CHANNEL_SERVER) {
+        options.server = "http://localhost:3845";
+    }
     if (!options.budget && BUDGET_KEY) { options.budget = BUDGET_KEY }
     return options;
 }
@@ -870,22 +935,466 @@ async function publishFileAsPage(filePath: string, name: string, channelServer: 
     printUrl();
 }
 
+// ── 384 init ────────────────────────────────────────────────────────────────
+
+const DOC_INIT = `Bootstrap a developer environment
+
+Creates a ledger channel (consuming a storage token), then budds a budget
+channel off the ledger. Both keys are saved to ~/.os384/config.json and
+pre-computed handles are written to ~/.os384/keys.js.
+
+With --local, the token is optional. If omitted, tries the local admin
+server (port 3849) to refresh it; if that's unreachable, falls back to
+the well-known static dev token. A channel server (port 3845) is still
+required.
+
+For remote servers (384.dev etc.), a token must be provided (from an admin
+or via 'bootstrap.token.ts').
+
+Example:
+  384 init --local                     # use default local dev token
+  384 init --local <token>             # use a specific token against localhost
+  384 init <token>                     # 'dev' profile → c3.384.dev
+  384 init --profile staging <token>   # custom profile name`;
+
+const LOCAL_ADMIN_SERVER = 'http://localhost:3849';
+const LOCAL_STATIC_TOKEN = 'LM2r39oAn1F8aMsicKTInXZb5L81JihNghBfJguAPVWZq5k';
+
+interface InitOptions {
+    server: string;
+    local?: boolean;
+    profile?: string;
+}
+
+async function handleInitCommand(options: InitOptions, token?: string): Promise<void> {
+    const profileName = options.profile || (options.local ? 'local' : 'dev');
+    const channelServer = options.local ? 'http://localhost:3845' : options.server;
+    const storageServer = options.local ? 'http://localhost:3843' : DEFAULT_STORAGE_SERVER;
+
+    // For --local, token is optional. If not provided, try the admin server;
+    // if that's down too, fall back to the well-known static dev token
+    // (the channel server may still be running even without the admin server).
+    if (options.local && !token) {
+        console.log("Refreshing local dev token via admin server...");
+        try {
+            const resp = await fetch(`${LOCAL_ADMIN_SERVER}/refresh`);
+            if (!resp.ok) {
+                console.warn(`  Warning: admin server returned ${resp.status} — using static dev token.`);
+            } else {
+                console.log("  " + await resp.text());
+            }
+        } catch (_e: unknown) {
+            console.warn(`  Warning: could not reach local admin server at ${LOCAL_ADMIN_SERVER}`);
+            console.warn("  Using static dev token (channel server may still be running).");
+        }
+        token = LOCAL_STATIC_TOKEN;
+    }
+
+    if (!token) {
+        console.error("A storage token is required. Use --local for local dev, or pass a token.");
+        denoExit(1);
+        return;
+    }
+
+    console.log(SEP, `Initializing profile '${profileName}' on ${channelServer}`, SEP);
+
+    // Step 1: Create ledger channel from token
+    console.log("Creating ledger channel from token...");
+    const ledgerIdentity = await new SB384().ready;
+    const ledgerKey = ledgerIdentity.userPrivateKey;
+    const ledgerChannel = await new Channel(ledgerKey).ready;
+    ledgerChannel.channelServer = channelServer;
+
+    try {
+        await ledgerChannel.create(token as SBStorageToken);
+    } catch (error: any) {
+        console.error("Failed to create ledger channel:", error.message || error);
+        console.error("Is the token valid and unused? Is the server reachable?");
+        denoExit(1);
+    }
+    console.log("  Ledger channel created:", ledgerIdentity.userId);
+
+    // Step 2: Mint a large token from the ledger and create the budget channel with it.
+    // Ledger keeps a small reserve for metadata; budget gets the rest.
+    console.log("Creating budget channel from ledger...");
+    const budgetIdentity = await new SB384().ready;
+    const budgetKey = budgetIdentity.userPrivateKey;
+    const budgetChannel = await new Channel(budgetKey).ready;
+    budgetChannel.channelServer = channelServer;
+
+    try {
+        const ledgerLimit = await ledgerChannel.getStorageLimit();
+        const ledgerReserve = 16 * MiB;
+        const budgetAmount = ledgerLimit.storageLimit - ledgerReserve;
+        const budgetToken = await ledgerChannel.getStorageToken(budgetAmount);
+        await budgetChannel.create(budgetToken as SBStorageToken);
+    } catch (error: any) {
+        console.error("Failed to create budget channel:", error.message || error);
+        denoExit(1);
+    }
+    console.log("  Budget channel created:", budgetIdentity.userId);
+
+    // Step 3: Record on ledger
+    try {
+        await ledgerChannel.send(JSON.stringify({
+            type: 'init',
+            timestamp: new Date().toISOString(),
+            budgetChannel: budgetIdentity.userId,
+            profile: profileName,
+        }));
+        console.log("  Init record written to ledger");
+    } catch (error: any) {
+        console.warn("  Warning: could not write init record to ledger:", error.message);
+    }
+
+    // Step 4: Save to config.json
+    const config: Os384Config = readConfig() || { version: 1, profiles: {} };
+    config.profiles[profileName] = {
+        channelServer,
+        storageServer,
+        budgetKey,
+        ledgerKey,
+    };
+    // init does not set defaultProfile — that's a separate user choice
+    writeConfig(config);
+
+    // Step 5: Generate keys.js (pre-computed handle objects for all profiles)
+    console.log("Generating keys.js...");
+    await writeKeysJs();
+
+    console.log(SEP,
+        `Profile '${profileName}' saved to ${CONFIG_FILE}`,
+        SEP,
+        `  channelServer: ${channelServer}`,
+        `\n  storageServer: ${storageServer}`,
+        `\n  budgetKey:     ${budgetKey.slice(0, 12)}...`,
+        `\n  ledgerKey:     ${ledgerKey.slice(0, 12)}...`,
+        SEP,
+        "You can now use '384 channel', '384 publish', etc. without setting env vars.",
+        `\nkeys.js written to ${KEYS_FILE}`,
+        "\nSymlink keys.js into your repo directories, or run 'make env' in each repo.",
+        SEP);
+}
+
+// ── keys.js generation ──────────────────────────────────────────────────────
+
+const KEYS_FILE = `${OS384_CONFIG_PATH}/keys.js`;
+
+/** Derive a full ChannelHandle-shaped object from a private key string.
+ *  Uses SB384 to compute channelId and ownerPublicKey from the key. */
+async function deriveHandle(privateKey: string, channelServer: string): Promise<{
+    channelId: string;
+    userPrivateKey: string;
+    channelServer: string;
+    channelData: { channelId: string; ownerPublicKey: string };
+}> {
+    const identity = await new SB384(privateKey as SBUserPrivateKey).ready;
+    const channelId = identity.userId;
+    const ownerPublicKey = identity.userPublicKey;
+    return {
+        channelId,
+        userPrivateKey: privateKey,
+        channelServer,
+        channelData: { channelId, ownerPublicKey },
+    };
+}
+
+/** Generate keys.js content from config.json. This is a browser-compatible IIFE
+ *  that reads `serverType` from the outer scope (set by env.js in browser) or
+ *  from the ENV environment variable (in Deno), and populates globalThis.env
+ *  with all pre-computed key material for all profiles.
+ *
+ *  The async crypto (SB384 key derivation) happens here at generation time —
+ *  the resulting keys.js is purely synchronous to import. */
+async function generateKeysJs(config: Os384Config): Promise<string> {
+    const profileNames = ['local', 'dev'].filter(name => name in config.profiles);
+
+    // Derive full handle objects (async crypto)
+    const handles: Record<string, {
+        walletHandle?: Awaited<ReturnType<typeof deriveHandle>>;
+        ledgerHandle?: Awaited<ReturnType<typeof deriveHandle>>;
+    }> = {};
+    for (const name of profileNames) {
+        const profile = config.profiles[name];
+        handles[name] = {};
+        if (profile.budgetKey) {
+            handles[name].walletHandle = await deriveHandle(profile.budgetKey, profile.channelServer);
+        }
+        if (profile.ledgerKey) {
+            handles[name].ledgerHandle = await deriveHandle(profile.ledgerKey, profile.channelServer);
+        }
+    }
+
+    // Check for lib384 channel keys from environment variables
+    const lib384IifeKey = Deno.env.get('OS384_LIB384_IIFE') || Deno.env.get('sb384_lib384_iife') || null;
+    const lib384EsmKey = Deno.env.get('OS384_LIB384_ESM') || Deno.env.get('sb384_lib384_esm') || null;
+
+    const lines: string[] = [];
+    lines.push('// Auto-generated by `384 init` — do not edit');
+    lines.push(`// Generated: ${new Date().toISOString()}`);
+    lines.push('// Contains pre-computed key material for all profiles.');
+    lines.push('// Reads serverType from env.js (browser) or ENV variable (Deno).');
+    lines.push('');
+
+    lines.push('const DEBUG = false;');
+    lines.push('const DEBUG2 = false;');
+    lines.push('');
+
+    lines.push('(function (global, factory) {');
+    lines.push('    if (typeof globalThis !== "undefined") {');
+    lines.push('        factory(globalThis);');
+    lines.push('    } else if (typeof global !== "undefined") {');
+    lines.push('        factory(global);');
+    lines.push('    } else if (typeof window !== "undefined") {');
+    lines.push('        factory(window);');
+    lines.push('    } else {');
+    lines.push('        throw new Error("keys.js: global is undefined");');
+    lines.push('    }');
+    lines.push('}(this, function (global) {');
+    lines.push('');
+    lines.push('    // In Deno/Node, ENV variable takes precedence; in browser, env.js sets serverType');
+    lines.push('    const configServerType =');
+    lines.push('        (typeof Deno !== "undefined" && Deno.env && Deno.env.get("ENV"))');
+    lines.push('        || (typeof serverType !== "undefined" ? serverType : "dev");');
+    lines.push('');
+
+    // Emit lib384 keys if available
+    if (lib384IifeKey) {
+        lines.push(`    const localLib384Key = ${JSON.stringify(lib384IifeKey)};`);
+        lines.push('    const devLib384Key = localLib384Key;');
+    }
+    if (lib384EsmKey) {
+        lines.push(`    const localLib384esmKey = ${JSON.stringify(lib384EsmKey)};`);
+        lines.push('    const devLib384esmKey = localLib384esmKey;');
+    }
+    if (lib384IifeKey || lib384EsmKey) lines.push('');
+
+    // Emit per-profile wallet/budget and ledger handles + keys
+    for (const name of profileNames) {
+        const profile = config.profiles[name];
+        const h = handles[name];
+
+        lines.push(`    // ── profile: ${name} ──`);
+        lines.push('');
+
+        if (h.walletHandle) {
+            lines.push(`    const ${name}WalletHandle =`);
+            const handleJson = JSON.stringify(h.walletHandle, null, 8);
+            lines.push(`    ${handleJson};`);
+            lines.push(`    const ${name}BudgetKey = ${JSON.stringify(profile.budgetKey)};`);
+        }
+        lines.push('');
+
+        if (h.ledgerHandle) {
+            lines.push(`    const ${name}LedgerHandle =`);
+            const handleJson = JSON.stringify(h.ledgerHandle, null, 8);
+            lines.push(`    ${handleJson};`);
+            lines.push(`    const ${name}LedgerKey = ${JSON.stringify(profile.ledgerKey)};`);
+        }
+        lines.push('');
+    }
+
+    // Build the env object
+    lines.push('    const env = {');
+    lines.push('        configServerType,');
+    lines.push('        DEBUG,');
+    lines.push('        DEBUG2,');
+    for (const name of profileNames) {
+        const profile = config.profiles[name];
+        if (profile.budgetKey) {
+            lines.push(`        ${name}BudgetKey,`);
+            lines.push(`        ${name}WalletHandle,`);
+        }
+        if (profile.ledgerKey) {
+            lines.push(`        ${name}LedgerKey,`);
+            lines.push(`        ${name}LedgerHandle,`);
+        }
+    }
+    if (lib384IifeKey) {
+        lines.push('        localLib384Key,');
+        lines.push('        devLib384Key,');
+    }
+    if (lib384EsmKey) {
+        lines.push('        localLib384esmKey,');
+        lines.push('        devLib384esmKey,');
+    }
+    lines.push('    };');
+    lines.push('');
+    lines.push('    global.env = env;');
+    lines.push('}));');
+    lines.push('');
+
+    return lines.join('\n');
+}
+
+/** Write keys.js to ~/.os384/keys.js. Called by 384 init after saving config. */
+async function writeKeysJs(): Promise<void> {
+    const config = readConfig();
+    if (!config || Object.keys(config.profiles).length === 0) {
+        console.warn("No profiles in config.json — skipping keys.js generation.");
+        return;
+    }
+    const content = await generateKeysJs(config);
+    ensureConfigDir();
+    await Deno.writeTextFile(KEYS_FILE, content);
+    console.log(`  keys.js written to ${KEYS_FILE}`);
+}
+
+// ── 384 token ───────────────────────────────────────────────────────────────
+
+const DOC_TOKEN = `Create a storage token identifier
+
+Generates a correctly-formed storage token hash (LM2r... prefix).
+This does NOT authorize the token — it must be inserted into a server's
+LEDGER_NAMESPACE KV store before it can be used.
+
+Use '384 mint' to mint an authorized token from an existing budget channel.
+
+Examples:
+  384 token                  # print a new token hash
+  384 token --quiet          # just the hash, no explanation`;
+
+interface TokenOptions {
+    server: string;
+    quiet?: boolean;
+}
+
+function handleTokenCommand(options: TokenOptions): void {
+    // Same logic as lib384's generateStorageToken(): LM2r prefix + 32 random bytes in base62
+    const hash = 'LM2r' + arrayBufferToBase62(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    if (options.quiet) {
+        console.log(hash);
+    } else {
+        console.log(SEP_, `Storage token identifier: ${hash}`, SEP);
+        console.log("To authorize this token, try something like this in a channel server directory:");
+        console.log(`wrangler kv key put --preview --persist-to /Volumes/os384/wrangler --binding=LEDGER_NAMESPACE "${hash}}" '{"hash":"${hash}}","used":false,"size":60000000000,"motherChannel":"<WRANGLER Command Line>"}'`)
+        // console.log(`  wrangler kv:key put --binding=LEDGER_NAMESPACE "${hash}" '{"used":false,"size":33554432}'`);
+        console.log(SEP);
+    }
+}
+
+// ── 384 channels ────────────────────────────────────────────────────────────
+
+const DOC_CHANNELS = `List channels across all profiles
+
+Shows budget and ledger channels (from config.json) for every profile,
+plus any channels recorded on each ledger. Queries each channel for
+remaining storage budget.
+
+Examples:
+  384 list-channels              # list all profiles`;
+
+interface ChannelsOptions {
+    server?: string;
+    local?: boolean;
+}
+
+async function handleChannelsCommand(_options: ChannelsOptions): Promise<void> {
+    const config = readConfig();
+    if (!config || Object.keys(config.profiles).length === 0) {
+        console.error("No config.json found (or no profiles). Run '384 init <token>' first.");
+        denoExit(1);
+        return;
+    }
+
+    // Helper: query a channel's storage limit
+    async function queryStorage(key: string, server: string): Promise<string> {
+        try {
+            const ch = await new Channel(key).ready;
+            ch.channelServer = server;
+            const limit = await ch.getStorageLimit();
+            return `${(limit.storageLimit / (1024 * 1024)).toFixed(2)} MiB`;
+        } catch (e: any) {
+            return `(unreachable: ${e.message})`;
+        }
+    }
+
+    for (const [profileName, profile] of Object.entries(config.profiles)) {
+        console.log(SEP_, `Profile: ${profileName}  (server: ${profile.channelServer})`);
+
+        if (!profile.ledgerKey) {
+            console.log('  (no ledger key — incomplete profile)');
+            console.log(SEP);
+            continue;
+        }
+
+        // ── Budget channel ──────────────────────────────────────────────
+        if (profile.budgetKey) {
+            const budgetId = (await new SB384(profile.budgetKey).ready).userId;
+            const storage = await queryStorage(profile.budgetKey, profile.channelServer);
+            console.log(`\n  budget   ${budgetId.slice(0, 16)}...  ${storage}`);
+        }
+
+        // ── Ledger channel ──────────────────────────────────────────────
+        const ledgerChannel = await new Channel(profile.ledgerKey).ready;
+        ledgerChannel.channelServer = profile.channelServer;
+        const ledgerId = (await new SB384(profile.ledgerKey).ready).userId;
+        const ledgerStorage = await queryStorage(profile.ledgerKey, profile.channelServer);
+        console.log(`  ledger   ${ledgerId.slice(0, 16)}...  ${ledgerStorage}`);
+
+        // ── Ledger records ──────────────────────────────────────────────
+        console.log('\n  Ledger records:');
+
+        let recordCount = 0;
+        try {
+            const { keys } = await ledgerChannel.getMessageKeys('0');
+            if (keys.size > 0) {
+                const messages = await ledgerChannel.getMessageMap(keys);
+                for (const [_key, message] of messages) {
+                    try {
+                        const body = typeof message.body === 'string'
+                            ? JSON.parse(message.body)
+                            : message.body;
+                        if (!body || typeof body !== 'object' || !body.type) continue;
+
+                        recordCount++;
+                        const ts = body.timestamp ? `  ${body.timestamp}` : '';
+                        console.log(`\n    [${body.type}]${ts}`);
+
+                        for (const [k, v] of Object.entries(body)) {
+                            if (['type', 'timestamp'].includes(k)) continue;
+                            console.log(`      ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+                        }
+                    } catch {
+                        // skip non-JSON entries
+                    }
+                }
+            }
+        } catch (e: any) {
+            console.error(`  Could not read ledger: ${e.message}`);
+        }
+
+        if (recordCount === 0) {
+            console.log('    (no records)');
+        }
+
+        console.log(SEP);
+    }
+}
+
+// ── CLI help / doc strings ──────────────────────────────────────────────────
+
 const DOC_CLI = `os384 command line interface
 
 See below for subcommands; each has its own help. The global options below
 do not always apply to all subcommands, and they may be interpreted differently.
 
-You will probably want to add two environment variables to your shell startup:
+Configuration is read from ~/.os384/config.json (created by '384 init').
+Environment variables override config.json; CLI flags override everything.
 
-- OS384_BUDGET_KEY will be used as default budget source
-- OS384_LEDGER_KEY records any and all metadata
+Key environment variables:
+  OS384_BUDGET_KEY       default budget source (overrides config.json)
+  OS384_LEDGER_KEY       default ledger (overrides config.json)
+  OS384_CHANNEL_SERVER   channel server (default: from config or https://c3.384.dev)
+  OS384_PROFILE          which config.json profile to use (default: 'dev')
+  OS384_CONFIG_HOME      config directory (default: ~/.os384)
+  OS384_DATA_HOME        bulk data directory (default: /Volumes/os384)
 
-Less commonly you may want these overrides:
+Quick start:
+  384 init <token>       bootstrap developer environment (generates ~/.os384/keys.js)
+  384 token              create a storage token identifier
 
-- OS384_HOME: where to store various local data (default is ~/.os384)
-- OS384_CHANNEL_SERVER sets channel server (default is 'https://c3.384.dev')
-
-(c) 2024, 384 (tm) Inc. Please note this is pre-production beta software.`;
+(c) 2024-2026, 384 (tm) Inc. Please note this is pre-production beta software.`;
 
 
 const DOC_PAGE = `Publish a file as a Page
@@ -1064,12 +1573,25 @@ export function inspectBinaryData(data: ArrayBuffer | ArrayBufferView) {
     return lines.join('\n');
 }
 
-async function streamChannel(server: string, channelOwnerKey: string, live = false, detail: boolean = false, wrapper: boolean = false) {
+// Default keyInfo for SBFS ledger channels (must match SBFS.ts default)
+const SBFS_DEFAULT_KEY_INFO = {
+    salt1: new Uint8Array([236, 15, 149, 57, 16, 61, 101, 82, 24, 206, 80, 70, 162, 38, 253, 33]),
+    iterations1: 100000,
+    iterations2: 10000,
+    hash1: "SHA-256",
+    summary: "PBKDF2 - SHA-256 - AES-GCM"
+}
+
+async function streamChannel(server: string, channelOwnerKey: string, live = false, detail: boolean = false, wrapper: boolean = false, phrase?: string) {
     const SB = new ChannelApi(server)
     try {
         const chan = await SB.connect(channelOwnerKey).ready
         const handle = chan.handle
-        const c = await (new ChannelStream(handle /* , protocol if needed */)).ready
+        const protocol = phrase
+            ? new Protocol_AES_GCM_256(phrase, SBFS_DEFAULT_KEY_INFO)
+            : undefined
+        if (phrase) console.log("[stream] Using passphrase for decryption")
+        const c = await (new ChannelStream(handle, protocol)).ready
         for await (const message of c.start({ prefix: '0', live: live })) {
             if (wrapper)
                 console.log(SEP, "MESSAGE", SEP, message, SEP, "BODY", SEP, message.body)
@@ -1297,6 +1819,7 @@ interface ManifestChannel {
             ownerPublicKey: string;
         };
     };
+    passphrase?: string;
 }
 
 interface SocialProof {
@@ -1469,8 +1992,11 @@ async function handleManifestResolveCommand(options: Options): Promise<void> {
                     ownerPublicKey: newChannel.channelData.ownerPublicKey
                 }
             };
-            
-            console.log(`Channel '${channel.name}' created successfully`);
+
+            // Generate a passphrase for protocol encryption (matches loader behavior)
+            channel.passphrase = await generatePassPhrase();
+
+            console.log(`Channel '${channel.name}' created successfully (passphrase generated)`);
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             console.error(`Error creating channel '${channel.name}': ${errorMessage}`);
@@ -1777,6 +2303,30 @@ await new Command()
     .globalOption("-l, --local", "Use local servers", { default: false })
     .globalOption("-s, --server <server:string>", "Channel server to use (optional)", { default: DEFAULT_CHANNEL_SERVER })
 
+    .command("init")
+    .description(DOC_INIT)
+    .option("--profile <profile:string>", "Profile name (default: 'dev', or 'local' with --local)", { required: false })
+    .arguments("[token:string]")
+    .action(async (options, token) => {
+        await handleInitCommand(preProcessOptions(options) as InitOptions, token);
+        denoExit(0);
+    })
+
+    .command("token")
+    .description(DOC_TOKEN)
+    .option("-q, --quiet", "Print only the token hash", { default: false })
+    .action((options) => {
+        handleTokenCommand(options as TokenOptions);
+        denoExit(0);
+    })
+
+    .command("list-channels")
+    .description(DOC_CHANNELS)
+    .action(async (options) => {
+        await handleChannelsCommand(options as ChannelsOptions);
+        denoExit(0);
+    })
+
     .command("channel")
     .description(DOC_CHANNEL)
     .option("-t, --token <token:string>", "Storage token", { required: false })
@@ -1854,9 +2404,10 @@ If you omit the channel key, it'll generate a new one (keep track of it!)`)
     .option("-e, --live", "Enable live streaming.", { default: false })
     .option("-d, --detail", "Enable detailed output (parses payloads).", { default: false })
     .option("-w, --wrapper", "Enable wrapper output (that wraps 'body').", { default: false })
-    .action(async ({ server, key, live, detail, wrapper }) => {
+    .option("-p, --phrase <phrase:string>", "Passphrase for protocol decryption (e.g. SBFS ledger channels).")
+    .action(async ({ server, key, live, detail, wrapper, phrase }) => {
         if (key) {
-            await streamChannel(server, key, live, detail, wrapper);
+            await streamChannel(server, key, live, detail, wrapper, phrase);
         } else {
             console.error("Channel key is required for streaming");
             denoExit(1);

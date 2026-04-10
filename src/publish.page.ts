@@ -22,7 +22,7 @@
 // the build pipe for 384cli itself depends on this, so if 384cli is at any
 // point broken, then lib384 can't be built
 
-import '../env.js'
+import '../keys.js'
 import '../config.js'
 
 // @deno-types="../dist/384.esm.d.ts"

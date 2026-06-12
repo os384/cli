@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net --allow-env
+#!/usr/bin/env -S deno run --allow-all
 
 /*
  * Copyright (C) 2019-2021 Magnusson Institute

@@ -62,7 +62,4 @@ For production install (non-workspace), lib384 is loaded from its channel page U
 
 ## What NOT to do
 
-- Do NOT use the `CLI/` directory in the archive — that is the deprecated
-  Snackabra CLI. The source here was copied from `lib-proto-03/cli.tools/`.
 - Do NOT import npm packages (no node_modules, no package.json).
-- Do NOT commit `env.js` — holds channel keys / server credentials.

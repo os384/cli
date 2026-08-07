@@ -41,6 +41,9 @@ import {
     ChannelHandle, SBFile, extractPayload, Protocol_AES_GCM_256,
 } from "https://c3.384.dev/api/v2/page/H93wQduy/384.esm.20260330.2.js";
 
+// DP-04 — `384 app` command group (PermaFest publishing)
+import { appCommand } from "./app.ts";
+
 // lib384 via JSR (future — pending Deno/TypeScript version compatibility)
 // import {
 //     SB384, ChannelApi, Channel, ChannelStream, SBServerInfo, SBUserPrivateKey, SBStorageToken,
@@ -2302,6 +2305,8 @@ await new Command()
     .globalOption("-k, --key <key:string>", "Channel (user) private key", { required: false })
     .globalOption("-l, --local", "Use local servers", { default: false })
     .globalOption("-s, --server <server:string>", "Channel server to use (optional)", { default: DEFAULT_CHANNEL_SERVER })
+
+    .command("app", appCommand)
 
     .command("init")
     .description(DOC_INIT)

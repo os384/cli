@@ -8,10 +8,10 @@
 URL_FOR_LIB384_D_TS="https://c3.384.dev/api/v2/page/u2d23u7w/384.esm.d.ts"
 URL_FOR_384_ESM_JS="https://c3.384.dev/api/v2/page/7938Nx0wM39T/384.esm.js"
 
-local_lib384_d_ts="../../lib384/dist/384.esm.d.ts"
-local_384_esm_js="../../lib384/dist/384.esm.js"
+local_lib384_d_ts="../../lib/dist/384.esm.d.ts"
+local_384_esm_js="../../lib/dist/384.esm.js"
 
-local_lib_map="../../lib384/dist/384.esm.js.map"
+local_lib_map="../../lib/dist/384.esm.js.map"
 
 # Check if 384.esm.d.ts exists locally
 if [ -f "$local_lib384_d_ts" ]; then

@@ -1,7 +1,11 @@
 # 384 CLI
 
-Command-line interface for [os384](https://384.dev). Provides the `384` command for
-administering os384 servers, managing channels and storage, and publishing content.
+*Part of the [os384 superproject](https://github.com/os384/os384) — start
+there for what os384 is, the workspace map, and conventions. This file covers
+only what's local to this repo.*
+
+The `384` command: administering os384 servers, managing channels and storage,
+minting tokens, and publishing content and apps to channel pages.
 
 ## Install
 
@@ -13,9 +17,10 @@ brew install deno
 
 # or: curl -fsSL https://deno.land/install.sh | sh
 
-# Install 384 globally. It's always safe to toggle the date version to any value.
+# Install 384 globally. It's always safe to toggle the date version to any value
+# (channel pages serve the current build regardless — the date is a cache-buster).
 deno install -f --global -n 384 --allow-read --allow-write --allow-net --allow-env \
-  https://c3.384.dev/api/v2/page/8yp0Lyfr/384.20260409.0.ts
+  https://c3.384.dev/api/v2/page/8yp0Lyfr/384.20260404.0.ts
 ```
 
 Make sure `~/.deno/bin` is on your PATH:
@@ -37,6 +42,9 @@ Note that os384 uses os384 for "package management".
 384 storage token -s https://c3.384.dev
 ```
 
+Subcommands have their own help screens. See the CLI guide in
+[../docs/docs/cli.md](../docs/docs/cli.md) for the full reference.
+
 ## Development
 
 ```sh
@@ -47,10 +55,14 @@ deno task run -- --help
 deno task dev -- --help
 ```
 
-The CLI imports lib384 from its deployed channel page at
-`https://c3.384.dev/api/v2/page/H93wQduy/384.esm.js`. For local lib384
-development, you can temporarily point the import back to `../dist/384.esm.js`
-and use the workspace `deno.json` at `../` for local resolution.
+The CLI imports lib384 from its deployed channel page. For local lib384
+development, point the import at the sibling submodule's build
+(`../lib/dist/384.esm.js`) instead — and remember lib384 consumers see
+`dist/`, not `src/`, so rebuild lib first (see [../lib/](../lib/)).
+
+`src/` holds the merged `384` command (`384.ts`) — most earlier standalone
+CLI tools have been refactored into it ("v1" and "v3" historical scripts are
+archived); a few specific commands remain as standalone files in `src/`.
 
 ## Architecture
 
@@ -61,4 +73,5 @@ manage — no npm, no package registry, no binary releases needed.
 
 ## License
 
-AGPL-3.0
+Copyright (C) 2022–2026, 384, Inc. "384" and "os384" are registered
+trademarks. Released under AGPLv3 — see [LICENSE](LICENSE).
